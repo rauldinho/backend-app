@@ -1,0 +1,14 @@
+# render.yaml — Infrastructure-as-code for Render
+# Docs: https://render.com/docs/render-yaml-spec
+
+services:
+  - type: web
+    name: ws-broadcast-demo
+    runtime: node
+    plan: free          # free tier is fine for testing
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
