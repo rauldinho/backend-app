@@ -1,10 +1,11 @@
-const express = require('express');
-const http    = require('http');
-const { WebSocketServer } = require('ws');
-const path    = require('path');
+const express  = require('express');
+const http     = require('http');
+const { Server } = require('socket.io');
+const path     = require('path');
 
 const app    = express();
 const server = http.createServer(app);
+const io     = new Server(server);
 
 // ─── Static client ────────────────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, 'public')));
@@ -13,7 +14,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.get('/health', (_req, res) => {
   res.json({
     status:  'ok',
-    clients: wss.clients.size,
+    clients: io.engine.clientsCount,
     history: messageHistory.length,
   });
 });
@@ -21,127 +22,79 @@ app.get('/health', (_req, res) => {
 // ─── In-memory state ──────────────────────────────────────────────────────────
 const MAX_HISTORY = 50;
 const messageHistory = [];
-
-// ─── WebSocket server (noServer mode = we control the upgrade manually) ───────
-// This is more reliable on Render and other reverse-proxy PaaS platforms.
-const wss = new WebSocketServer({ noServer: true });
-
 let nextClientId = 1;
 
-// ─── Explicit HTTP → WebSocket upgrade handler ────────────────────────────────
-server.on('upgrade', (request, socket, head) => {
-  const { pathname } = new URL(request.url, `http://${request.headers.host}`);
-  console.log(`[UPGRADE] path=${pathname} origin=${request.headers.origin ?? 'n/a'}`);
-
-  if (pathname === '/ws') {
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit('connection', ws, request);
-    });
-  } else {
-    console.log(`[UPGRADE] rejected unknown path: ${pathname}`);
-    socket.destroy();
-  }
-});
-
 // ─── Connection logic ─────────────────────────────────────────────────────────
-wss.on('connection', (ws) => {
-  ws.clientId = nextClientId++;
-  ws.username = null;
-  ws.isAlive  = true;
+io.on('connection', (socket) => {
+  socket.clientId = nextClientId++;
+  socket.username = null;
 
-  ws.on('pong', () => { ws.isAlive = true; });
-
-  ws.on('message', (raw) => {
-    let payload;
-    try { payload = JSON.parse(raw.toString()); }
-    catch { return; }
-
-    // ── Join handshake ──────────────────────────────────────────────────────
-    if (!ws.username) {
-      if (payload.type !== 'join' || !payload.username?.trim()) {
-        ws.send(JSON.stringify({ type: 'error', message: 'Send { type:"join", username:"<name>" } first.' }));
-        return;
-      }
-
-      ws.username = sanitize(payload.username.trim()).slice(0, 24) || `User${ws.clientId}`;
-
-      ws.send(JSON.stringify({
-        type:     'welcome',
-        clientId: ws.clientId,
-        username: ws.username,
-        history:  messageHistory,
-        users:    onlineUsers(),
-      }));
-
-      broadcast({
-        type:    'user_joined',
-        message: `${ws.username} joined the chat`,
-        users:   onlineUsers(),
-      }, ws);
-
-      console.log(`[WS] ${ws.username} (#${ws.clientId}) joined  (online: ${wss.clients.size})`);
+  // ── Join handshake ──────────────────────────────────────────────────────────
+  socket.on('join', ({ username } = {}) => {
+    if (!username?.trim()) {
+      socket.emit('error', { message: 'Send { type:"join", username:"<name>" } first.' });
       return;
     }
 
-    // ── Chat message ────────────────────────────────────────────────────────
-    if (payload.type === 'message') {
-      const text = sanitize(payload.text?.trim() ?? '');
-      if (!text) return;
+    socket.username = sanitize(username.trim()).slice(0, 24) || `User${socket.clientId}`;
 
-      const msg = {
-        type:      'message',
-        clientId:  ws.clientId,
-        username:  ws.username,
-        text,
-        timestamp: new Date().toISOString(),
-      };
+    socket.emit('welcome', {
+      clientId: socket.clientId,
+      username: socket.username,
+      history:  messageHistory,
+      users:    onlineUsers(),
+    });
 
-      messageHistory.push(msg);
-      if (messageHistory.length > MAX_HISTORY) messageHistory.shift();
+    socket.broadcast.emit('user_joined', {
+      message: `${socket.username} joined the chat`,
+      users:   onlineUsers(),
+    });
 
-      broadcast(msg);
-      console.log(`[WS] <${ws.username}> ${text}`);
-    }
+    console.log(`[IO] ${socket.username} (#${socket.clientId}) joined  (online: ${io.engine.clientsCount})`);
   });
 
-  ws.on('close', () => {
-    const name = ws.username ?? `Client #${ws.clientId}`;
-    console.log(`[WS] ${name} left  (online: ${wss.clients.size})`);
-    if (ws.username) {
-      broadcast({ type: 'user_left', message: `${ws.username} left the chat`, users: onlineUsers() });
-    }
+  // ── Chat message ─────────────────────────────────────────────────────────────
+  socket.on('message', ({ text } = {}) => {
+    if (!socket.username) return;
+    const sanitizedText = sanitize(text?.trim() ?? '');
+    if (!sanitizedText) return;
+
+    const msg = {
+      clientId:  socket.clientId,
+      username:  socket.username,
+      text:      sanitizedText,
+      timestamp: new Date().toISOString(),
+    };
+
+    messageHistory.push(msg);
+    if (messageHistory.length > MAX_HISTORY) messageHistory.shift();
+
+    io.emit('message', msg);
+    console.log(`[IO] <${socket.username}> ${sanitizedText}`);
   });
 
-  ws.on('error', (err) => {
-    console.error(`[WS] Error on ${ws.username ?? ws.clientId}:`, err.message);
+  // ── Disconnect ───────────────────────────────────────────────────────────────
+  socket.on('disconnect', () => {
+    const name = socket.username ?? `Client #${socket.clientId}`;
+    console.log(`[IO] ${name} left  (online: ${io.engine.clientsCount})`);
+    if (socket.username) {
+      io.emit('user_left', {
+        message: `${socket.username} left the chat`,
+        users:   onlineUsers(),
+      });
+    }
   });
 });
 
-// ─── Heartbeat (prevents Render proxy from killing idle connections) ──────────
-const heartbeat = setInterval(() => {
-  for (const ws of wss.clients) {
-    if (!ws.isAlive) { ws.terminate(); continue; }
-    ws.isAlive = false;
-    ws.ping();
-  }
-}, 30_000);
-
-wss.on('close', () => clearInterval(heartbeat));
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-function broadcast(data, exclude = null) {
-  const serialized = JSON.stringify(data);
-  for (const client of wss.clients) {
-    if (client !== exclude && client.readyState === 1) {
-      client.send(serialized);
+function onlineUsers() {
+  const users = [];
+  for (const [, socket] of io.of('/').sockets) {
+    if (socket.username) {
+      users.push({ clientId: socket.clientId, username: socket.username });
     }
   }
-}
-
-function onlineUsers() {
-  return [...wss.clients]
-    .filter(c => c.username && c.readyState === 1)
-    .map(c => ({ clientId: c.clientId, username: c.username }));
+  return users;
 }
 
 function sanitize(str) {

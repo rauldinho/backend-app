@@ -288,107 +288,79 @@
 
   </div>
 
+  <script src="/socket.io/socket.io.js"></script>
   <script>
     // ── DOM refs ─────────────────────────────────────────────────────────
-    const overlay      = document.getElementById('overlay');
+    const overlay       = document.getElementById('overlay');
     const usernameInput = document.getElementById('username-input');
-    const joinBtn      = document.getElementById('join-btn');
-    const dot          = document.getElementById('dot');
-    const connStatus   = document.getElementById('conn-status');
-    const meBadge      = document.getElementById('me-badge');
-    const log          = document.getElementById('log');
-    const msgInput     = document.getElementById('msg-input');
-    const sendBtn      = document.getElementById('send-btn');
-    const usersList    = document.getElementById('users-list');
+    const joinBtn       = document.getElementById('join-btn');
+    const dot           = document.getElementById('dot');
+    const connStatus    = document.getElementById('conn-status');
+    const meBadge       = document.getElementById('me-badge');
+    const log           = document.getElementById('log');
+    const msgInput      = document.getElementById('msg-input');
+    const sendBtn       = document.getElementById('send-btn');
+    const usersList     = document.getElementById('users-list');
 
     // ── State ─────────────────────────────────────────────────────────────
-    let ws         = null;
     let myClientId = null;
     let myUsername = null;
-    let pendingJoin = null;   // username to send once WS opens
 
     // ── Avatar colours (deterministic from clientId) ──────────────────────
     const COLOURS = ['#4f46e5','#0ea5e9','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#14b8a6'];
     const avatarColor = (id) => COLOURS[id % COLOURS.length];
     const initials    = (name) => name.slice(0, 2).toUpperCase();
 
+    // ── Socket.IO connection (auto-reconnects, proxy-friendly) ────────────
+    const socket = io({ autoConnect: true });
+
+    socket.on('connect',    () => setConnected(true));
+    socket.on('disconnect', () => {
+      setConnected(false);
+      addSystem('Disconnected. Reconnecting…');
+    });
+
     // ── Join button ───────────────────────────────────────────────────────
     function attemptJoin() {
       const name = usernameInput.value.trim();
       if (!name) { usernameInput.focus(); return; }
-      pendingJoin = name;
       overlay.classList.add('hidden');
-      connect();
+      socket.emit('join', { username: name });
     }
     joinBtn.addEventListener('click', attemptJoin);
     usernameInput.addEventListener('keydown', e => { if (e.key === 'Enter') attemptJoin(); });
 
-    // ── WebSocket ─────────────────────────────────────────────────────────
-    const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
-
-    function connect() {
-      ws = new WebSocket(wsUrl);
-
-      ws.addEventListener('open', () => {
-        setConnected(true);
-        // Send join handshake immediately
-        ws.send(JSON.stringify({ type: 'join', username: pendingJoin }));
-      });
-
-      ws.addEventListener('message', ({ data }) => {
-        const msg = JSON.parse(data);
-        handleMessage(msg);
-      });
-
-      ws.addEventListener('close', () => {
-        setConnected(false);
-        addSystem('Disconnected. Reconnecting in 3 s…');
-        setTimeout(connect, 3000);
-      });
-
-      ws.addEventListener('error', () => {
-        addSystem('Connection error.');
-      });
-    }
-
-    // ── Message handler ───────────────────────────────────────────────────
-    function handleMessage(msg) {
-      switch (msg.type) {
-        case 'welcome':
-          myClientId = msg.clientId;
-          myUsername = msg.username;
-          meBadge.textContent = `@${myUsername}`;
-          meBadge.style.display = '';
-          msgInput.disabled  = false;
-          sendBtn.disabled   = false;
-          msgInput.focus();
-          renderUsers(msg.users);
-          // Replay history
-          if (msg.history?.length) {
-            addSystem(`— Last ${msg.history.length} message(s) —`);
-            msg.history.forEach(renderBubble);
-          }
-          break;
-
-        case 'message':
-          renderBubble(msg);
-          break;
-
-        case 'user_joined':
-          addSystem(msg.message);
-          renderUsers(msg.users);
-          break;
-
-        case 'user_left':
-          addSystem(msg.message);
-          renderUsers(msg.users);
-          break;
-
-        case 'error':
-          addSystem(`⚠️ ${msg.message}`);
-          break;
+    // ── Server events ─────────────────────────────────────────────────────
+    socket.on('welcome', (msg) => {
+      myClientId = msg.clientId;
+      myUsername = msg.username;
+      meBadge.textContent = `@${myUsername}`;
+      meBadge.style.display = '';
+      msgInput.disabled = false;
+      sendBtn.disabled  = false;
+      msgInput.focus();
+      renderUsers(msg.users);
+      if (msg.history?.length) {
+        addSystem(`— Last ${msg.history.length} message(s) —`);
+        msg.history.forEach(renderBubble);
       }
+    });
+
+    socket.on('message',    renderBubble);
+    socket.on('user_joined', (msg) => { addSystem(msg.message); renderUsers(msg.users); });
+    socket.on('user_left',   (msg) => { addSystem(msg.message); renderUsers(msg.users); });
+    socket.on('error',       (msg) => { addSystem(`⚠️ ${msg.message}`); });
+
+    // ── Send message ──────────────────────────────────────────────────────
+    function sendMessage() {
+      const text = msgInput.value.trim();
+      if (!text || !socket.connected) return;
+      socket.emit('message', { text });
+      msgInput.value = '';
     }
+
+    sendBtn.addEventListener('click', sendMessage);
+    msgInput.addEventListener('keydown', e => { if (e.key === 'Enter') sendMessage(); });
 
     // ── Render helpers ────────────────────────────────────────────────────
     function renderBubble({ clientId, username, text, timestamp }) {
@@ -410,7 +382,7 @@
 
       const bubble = document.createElement('div');
       bubble.className = 'bubble';
-      bubble.textContent = text;   // already sanitized server-side
+      bubble.textContent = text;
 
       wrap.append(meta, bubble);
       row.append(isMe ? wrap : av, isMe ? av : wrap);
@@ -445,17 +417,6 @@
         usersList.appendChild(item);
       });
     }
-
-    // ── Send message ──────────────────────────────────────────────────────
-    function sendMessage() {
-      const text = msgInput.value.trim();
-      if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-      ws.send(JSON.stringify({ type: 'message', text }));
-      msgInput.value = '';
-    }
-
-    sendBtn.addEventListener('click', sendMessage);
-    msgInput.addEventListener('keydown', e => { if (e.key === 'Enter') sendMessage(); });
 
     // ── Connection state helpers ──────────────────────────────────────────
     function setConnected(on) {
