@@ -146,9 +146,9 @@ function onlineUsers() {
 
 function sanitize(str) {
   return str
+    .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/&/g, '&amp;');
+    .replace(/>/g, '&gt;');
 }
 
 // ─── Start ────────────────────────────────────────────────────────────────────
