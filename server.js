@@ -5,7 +5,10 @@ const path     = require('path');
 
 const app    = express();
 const server = http.createServer(app);
-const io     = new Server(server);
+const io     = new Server(server, {
+  pingInterval: 10_000,  // ping every 10s  (default: 25s)
+  pingTimeout:   5_000,  // disconnect if no pong in 5s (default: 20s)
+});
 
 // ─── Static client ────────────────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, 'public')));
