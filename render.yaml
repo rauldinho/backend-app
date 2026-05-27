@@ -6,7 +6,7 @@ services:
     name: ws-broadcast-demo
     runtime: node
     plan: free          # free tier is fine for testing
-    buildCommand: npm install
+    buildCommand: npm install --registry https://registry.npmjs.org
     startCommand: npm start
     healthCheckPath: /health
     envVars:
