@@ -19,23 +19,38 @@ app.get('/health', (_req, res) => {
 });
 
 // ─── In-memory state ──────────────────────────────────────────────────────────
-const MAX_HISTORY = 50;     // keep last N messages (lost on cold start — expected)
-const messageHistory = [];  // [{ clientId, username, text, timestamp }]
+const MAX_HISTORY = 50;
+const messageHistory = [];
 
-// ─── WebSocket server ─────────────────────────────────────────────────────────
-const wss = new WebSocketServer({ server, path: '/ws' });
+// ─── WebSocket server (noServer mode = we control the upgrade manually) ───────
+// This is more reliable on Render and other reverse-proxy PaaS platforms.
+const wss = new WebSocketServer({ noServer: true });
 
 let nextClientId = 1;
 
-wss.on('connection', (ws) => {
-  ws.clientId   = nextClientId++;
-  ws.username   = null;     // set on first message
-  ws.isAlive    = true;     // for heartbeat
+// ─── Explicit HTTP → WebSocket upgrade handler ────────────────────────────────
+server.on('upgrade', (request, socket, head) => {
+  const { pathname } = new URL(request.url, `http://${request.headers.host}`);
+  console.log(`[UPGRADE] path=${pathname} origin=${request.headers.origin ?? 'n/a'}`);
 
-  // ── Heartbeat: pong from client resets the flag ──────────────────────────
+  if (pathname === '/ws') {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  } else {
+    console.log(`[UPGRADE] rejected unknown path: ${pathname}`);
+    socket.destroy();
+  }
+});
+
+// ─── Connection logic ─────────────────────────────────────────────────────────
+wss.on('connection', (ws) => {
+  ws.clientId = nextClientId++;
+  ws.username = null;
+  ws.isAlive  = true;
+
   ws.on('pong', () => { ws.isAlive = true; });
 
-  // ── First message must be a "join" to claim a username ───────────────────
   ws.on('message', (raw) => {
     let payload;
     try { payload = JSON.parse(raw.toString()); }
@@ -50,16 +65,14 @@ wss.on('connection', (ws) => {
 
       ws.username = sanitize(payload.username.trim()).slice(0, 24) || `User${ws.clientId}`;
 
-      // Confirm to the joining client
       ws.send(JSON.stringify({
         type:     'welcome',
         clientId: ws.clientId,
         username: ws.username,
-        history:  messageHistory,        // replay last N messages
+        history:  messageHistory,
         users:    onlineUsers(),
       }));
 
-      // Announce to everyone else
       broadcast({
         type:    'user_joined',
         message: `${ws.username} joined the chat`,
@@ -83,26 +96,19 @@ wss.on('connection', (ws) => {
         timestamp: new Date().toISOString(),
       };
 
-      // Store in history (ring buffer)
       messageHistory.push(msg);
       if (messageHistory.length > MAX_HISTORY) messageHistory.shift();
 
-      broadcast(msg);   // send to ALL including sender
+      broadcast(msg);
       console.log(`[WS] <${ws.username}> ${text}`);
     }
   });
 
-  // ── Disconnect ─────────────────────────────────────────────────────────────
   ws.on('close', () => {
     const name = ws.username ?? `Client #${ws.clientId}`;
     console.log(`[WS] ${name} left  (online: ${wss.clients.size})`);
-
     if (ws.username) {
-      broadcast({
-        type:    'user_left',
-        message: `${ws.username} left the chat`,
-        users:   onlineUsers(),
-      });
+      broadcast({ type: 'user_left', message: `${ws.username} left the chat`, users: onlineUsers() });
     }
   });
 
@@ -111,15 +117,10 @@ wss.on('connection', (ws) => {
   });
 });
 
-// ─── Heartbeat interval ───────────────────────────────────────────────────────
-// Render's proxy closes idle WS connections after ~100 s.
-// Ping every 30 s; disconnect any client that missed a pong.
+// ─── Heartbeat (prevents Render proxy from killing idle connections) ──────────
 const heartbeat = setInterval(() => {
   for (const ws of wss.clients) {
-    if (!ws.isAlive) {
-      ws.terminate();
-      continue;
-    }
+    if (!ws.isAlive) { ws.terminate(); continue; }
     ws.isAlive = false;
     ws.ping();
   }
@@ -131,7 +132,7 @@ wss.on('close', () => clearInterval(heartbeat));
 function broadcast(data, exclude = null) {
   const serialized = JSON.stringify(data);
   for (const client of wss.clients) {
-    if (client !== exclude && client.readyState === 1 /* OPEN */) {
+    if (client !== exclude && client.readyState === 1) {
       client.send(serialized);
     }
   }
