@@ -324,7 +324,7 @@
     usernameInput.addEventListener('keydown', e => { if (e.key === 'Enter') attemptJoin(); });
 
     // ── WebSocket ─────────────────────────────────────────────────────────
-    const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
+    const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 
     function connect() {
       ws = new WebSocket(wsUrl);

@@ -23,7 +23,7 @@ const MAX_HISTORY = 50;     // keep last N messages (lost on cold start — expe
 const messageHistory = [];  // [{ clientId, username, text, timestamp }]
 
 // ─── WebSocket server ─────────────────────────────────────────────────────────
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ server, path: '/ws' });
 
 let nextClientId = 1;
 
